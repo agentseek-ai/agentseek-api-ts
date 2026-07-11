@@ -1,0 +1,57 @@
+{
+  "name": "agentseek-api-ts",
+  "version": "0.1.0",
+  "description": "Self-hosted LangGraph Agent Protocol server on Bun + PostgreSQL: background runs, resumable streams, crash recovery",
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "bun@1.3.14",
+  "bin": {
+    "agentseek-api": "./bin/agentseek-api.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "bun run --watch src/server.ts",
+    "start": "bun run src/server.ts",
+    "verify": "bun run scripts/verify-core.ts",
+    "test": "bun test",
+    "lint": "oxlint",
+    "format": "bun x prettier --write .",
+    "format:check": "bun x prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "check:type": "bun turbo typecheck",
+    "check": "bun run format && bun run lint && bun run check:type",
+    "prepare": "husky",
+    "reinstall": "rm -rf node_modules bun.lockb bun.lock && bun install"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.86.2",
+    "@types/bun": "^1.3.14",
+    "@types/pg": "^8.20.0",
+    "husky": "^9.1.7",
+    "oxlint": "^1.72.0",
+    "oxlint-tsgolint": "^0.24.0",
+    "prettier": "^3.9.4",
+    "turbo": "^2.10.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.2",
+    "@langchain/langgraph": "^1.4.7",
+    "@langchain/langgraph-api": "1.4.2",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
+    "@langchain/langgraph-sdk": "^1.9.25",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0",
+    "typescript": "^7.0.2"
+  }
+}

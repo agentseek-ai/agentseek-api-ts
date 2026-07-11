@@ -1,0 +1,45 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "options": {
+    "typeAware": true
+  },
+  "categories": {
+    "correctness": "error",
+    "perf": "warn",
+    "suspicious": "warn"
+  },
+  "rules": {
+    // --- TypeScript / Type-Aware ---
+    "typescript/no-base-to-string": "warn",
+    "typescript/no-floating-promises": "warn",
+    "typescript/no-misused-spread": "warn",
+    "typescript/consistent-return": "off", // TS 穷尽 switch（联合全覆盖）的已知误报；真正漏返回由 tsc 的穷尽分析兜住
+    "triple-slash-reference": "off", // SST/Plugin 需求
+
+    // --- Effect 生态适配 ---
+    "require-yield": "off", // Effect.gen 不需要总是 yield
+    "no-shadow": "off", // Effect 嵌套闭包常用到同名遮蔽
+
+    // --- SolidJS 生态适配 ---
+    "no-unassigned-vars": "off", // JSX ref 绑定需求
+    "no-unused-expressions": "off", // createEffect 追踪需求
+
+    // --- 通用逻辑与性能优化 ---
+    "no-control-regex": "off",
+    "no-new": "off",
+    "no-useless-concat": "off", // schema 长描述用 '...' + '...' 拼接只为源码可读,字符串值不变,非缺陷
+
+    // --- Agent runtime 异步循环语义 ---
+    "no-await-in-loop": "off", // 主循环/工具执行本质是顺序流式 await，并行化反而破坏语义与限流
+    "oxc/no-accumulating-spread": "off", // 主循环每个 continue 点用 state = { ...state } 构造不可变新状态（对照原版 query.ts），state 为 fixed-size 非 O(n²)
+
+    // --- Unicorn 风格裁剪 (减少过度检查的噪音) ---
+    "unicorn/consistent-function-scoping": "off",
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-array-reverse": "off",
+    "unicorn/prefer-add-event-listener": "off",
+    "unicorn/require-module-specifiers": "off",
+    "unicorn/require-post-message-target-origin": "off"
+  },
+  "ignorePatterns": ["**/node_modules", "**/dist", "**/.build", "**/.sst", "**/*.d.ts", "**/sdk.gen.ts"]
+}

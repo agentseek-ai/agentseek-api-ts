@@ -1,0 +1,18 @@
+# 报错即停止执行
+set -e
+
+echo "🚀 [Pre-Commit] 启动安全检查..."
+
+# 1. 逻辑分析
+echo "🧪 执行 bun lint..."
+bun lint
+
+# 2. 代码格式校验
+echo "🎨 执行 bun format:check..."
+bun format:check
+
+# 3. 深度类型核验
+echo "🔎 执行 bun check:type..."
+bun check:type
+
+echo "✅ [Pre-Commit] 检查通过，准予提交！"

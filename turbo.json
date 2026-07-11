@@ -1,0 +1,15 @@
+{
+  "$schema": "https://v2-10-0.turborepo.dev/schema.json",
+  "tasks": {
+    "typecheck": {
+      // 依赖项：^ 表示运行本项目之前先确保依赖的包也完成了 typecheck
+      "dependsOn": ["^typecheck"],
+      // 输入：只有这些文件变动时，才重新运行，否则直接读缓存
+      "inputs": ["src/**/*.ts", "src/**/*.tsx", "index.ts", "tsconfig.json"],
+      // 输出：typecheck 通常没有文件输出，保持为空即可
+      "outputs": [],
+      // 开启缓存
+      "cache": true
+    }
+  }
+}
