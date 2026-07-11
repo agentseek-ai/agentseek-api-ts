@@ -1,0 +1,8 @@
+{
+  "graphs": {
+    "agent": "./graphs/agent.ts:graph",
+    "chat": "./graphs/chat.ts:graph",
+    "approval": "./graphs/approval.ts:graph"
+  },
+  "env": ".env"
+}
