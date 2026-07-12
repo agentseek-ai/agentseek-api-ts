@@ -124,12 +124,23 @@ export class PgThreads implements ThreadsRepo {
     }
   }
 
+  // Auth-scoped thread lookup shared by get/delete/copy: null when the thread
+  // is missing OR the caller may not see it (callers pick their own status).
+  private async fetchThreadWithAuth(
+    thread_id: string,
+    filters: Parameters<typeof isAuthMatching>[1],
+  ): Promise<ThreadRow | null> {
+    const res = await this.pool.query<ThreadRow>(`SELECT * FROM threads WHERE thread_id = $1`, [thread_id])
+    const row = res.rows[0]
+    if (!row || !isAuthMatching(row.metadata, filters)) return null
+    return row
+  }
+
   async get(thread_id: string, auth: AuthContext | undefined): Promise<Thread> {
     const [filters] = await handleAuthEvent(auth, 'threads:read', { thread_id })
 
-    const res = await this.pool.query<ThreadRow>(`SELECT * FROM threads WHERE thread_id = $1`, [thread_id])
-    const row = res.rows[0]
-    if (!row || !isAuthMatching(row.metadata, filters)) {
+    const row = await this.fetchThreadWithAuth(thread_id, filters)
+    if (!row) {
       throw new HTTPException(404, {
         message: `Thread with ID ${thread_id} not found`,
       })
@@ -233,9 +244,8 @@ export class PgThreads implements ThreadsRepo {
   async delete(thread_id: string, auth: AuthContext | undefined): Promise<string[]> {
     const [filters] = await handleAuthEvent(auth, 'threads:delete', { thread_id })
 
-    const res = await this.pool.query<ThreadRow>(`SELECT * FROM threads WHERE thread_id = $1`, [thread_id])
-    const row = res.rows[0]
-    if (!row || !isAuthMatching(row.metadata, filters)) {
+    const row = await this.fetchThreadWithAuth(thread_id, filters)
+    if (!row) {
       throw new HTTPException(404, {
         message: `Thread with ID ${thread_id} not found`,
       })
@@ -260,9 +270,10 @@ export class PgThreads implements ThreadsRepo {
   async copy(thread_id: string, auth: AuthContext | undefined): Promise<Thread> {
     const [filters] = await handleAuthEvent(auth, 'threads:read', { thread_id })
 
-    const res = await this.pool.query<ThreadRow>(`SELECT * FROM threads WHERE thread_id = $1`, [thread_id])
-    const row = res.rows[0]
-    if (!row || !isAuthMatching(row.metadata, filters)) {
+    const row = await this.fetchThreadWithAuth(thread_id, filters)
+    if (!row) {
+      // Upstream quirk kept intentionally: copy signals a missing thread with
+      // 409, not 404.
       throw new HTTPException(409, { message: 'Thread not found' })
     }
 

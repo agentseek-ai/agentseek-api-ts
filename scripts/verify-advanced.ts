@@ -1,73 +1,17 @@
 // Advanced scenarios against a running server:
-// 1. messages-tuple token streaming: disconnect mid-stream, replay from PG,
-//    tokens must reassemble into the full text without corruption
+// 1. messages-tuple token streaming: disconnect mid-stream, replay from the
+//    buffer, tokens must reassemble into the full text without corruption
 // 2. interrupt() + Command resume (human-in-the-loop)
-// 3. double-texting with multitask_strategy=reject → 409
+// 3. double-texting with multitask_strategy=reject → 422
+import { readSse as readSseFrom, requestJson, type SseEvent } from '../tests/helpers'
+
 const BASE = process.env.BASE_URL ?? 'http://localhost:2024'
 
-interface SseEvent {
-  id: string | null
-  event: string
-  data: string
-}
-
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body != null ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${await res.text()}`)
-  return (await res.json()) as T
-}
-
-async function readSse(
+const req = <T>(method: string, path: string, body?: unknown): Promise<T> => requestJson<T>(BASE, method, path, body)
+const readSse = (
   path: string,
   opts: { lastEventId?: string; maxMs?: number; stopAfter?: number },
-): Promise<{ events: SseEvent[]; ended: boolean }> {
-  const controller = new AbortController()
-  const timer = opts.maxMs ? setTimeout(() => controller.abort(), opts.maxMs) : null
-  const headers: Record<string, string> = { Accept: 'text/event-stream' }
-  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId
-
-  const events: SseEvent[] = []
-  let ended = false
-  try {
-    const res = await fetch(`${BASE}${path}`, { headers, signal: controller.signal })
-    if (!res.ok || !res.body) throw new Error(`GET ${path} -> ${res.status}`)
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    let cur: Partial<SseEvent> = {}
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) {
-        ended = true
-        break
-      }
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        if (line.startsWith('id:')) cur.id = line.slice(3).trim()
-        else if (line.startsWith('event:')) cur.event = line.slice(6).trim()
-        else if (line.startsWith('data:')) cur.data = (cur.data ?? '') + line.slice(5).trim()
-        else if (line === '' && cur.event) {
-          events.push({ id: cur.id ?? null, event: cur.event, data: cur.data ?? '' })
-          cur = {}
-          if (opts.stopAfter && events.length >= opts.stopAfter) {
-            controller.abort()
-          }
-        }
-      }
-    }
-  } catch (e) {
-    if (!(e instanceof DOMException && e.name === 'AbortError')) throw e
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-  return { events, ended }
-}
+): Promise<{ events: SseEvent[]; ended: boolean }> => readSseFrom(BASE, path, opts)
 
 const tokenText = (events: SseEvent[]): string =>
   events

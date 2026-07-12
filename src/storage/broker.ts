@@ -38,10 +38,6 @@ export class RunBroker {
   private listeners = new Map<string, Set<() => void>>()
   private buffers = new Map<string, RunEventBuffer>()
 
-  isLocked(runId: string): boolean {
-    return this.controls.has(runId)
-  }
-
   lock(runId: string): AbortSignal {
     const control = new CancellationAbortController()
     this.controls.set(runId, control)

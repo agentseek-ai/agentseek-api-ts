@@ -1,77 +1,16 @@
 // Verifies the two core requirements against a running server:
 // 1. Background run survives SSE disconnect (client detach ≠ task death)
 // 2. Resumable streaming: reconnect with Last-Event-ID replays missed events
+import { readSse as readSseFrom, requestJson, type SseEvent } from '../tests/helpers'
+
 const BASE = process.env.BASE_URL ?? 'http://localhost:2024'
 
-interface SseEvent {
-  id: string | null
-  event: string
-  data: string
-}
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`POST ${path} -> ${res.status}: ${await res.text()}`)
-  return (await res.json()) as T
-}
-
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`)
-  return (await res.json()) as T
-}
-
-// Minimal SSE parser: reads events until aborted, maxEvents reached, or stream ends.
-async function readSse(
+const postJson = <T>(path: string, body: unknown): Promise<T> => requestJson<T>(BASE, 'POST', path, body)
+const getJson = <T>(path: string): Promise<T> => requestJson<T>(BASE, 'GET', path)
+const readSse = (
   path: string,
   opts: { lastEventId?: string; maxMs?: number },
-): Promise<{ events: SseEvent[]; ended: boolean }> {
-  const controller = new AbortController()
-  const timer = opts.maxMs ? setTimeout(() => controller.abort(), opts.maxMs) : null
-
-  const headers: Record<string, string> = { Accept: 'text/event-stream' }
-  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId
-
-  const events: SseEvent[] = []
-  let ended = false
-  try {
-    const res = await fetch(`${BASE}${path}`, { headers, signal: controller.signal })
-    if (!res.ok || !res.body) throw new Error(`GET ${path} -> ${res.status}`)
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    let cur: Partial<SseEvent> = {}
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) {
-        ended = true
-        break
-      }
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        if (line.startsWith('id:')) cur.id = line.slice(3).trim()
-        else if (line.startsWith('event:')) cur.event = line.slice(6).trim()
-        else if (line.startsWith('data:')) cur.data = (cur.data ?? '') + line.slice(5).trim()
-        else if (line === '' && cur.event) {
-          events.push({ id: cur.id ?? null, event: cur.event, data: cur.data ?? '' })
-          cur = {}
-        }
-      }
-    }
-  } catch (e) {
-    if (!(e instanceof DOMException && e.name === 'AbortError')) throw e
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-  return { events, ended }
-}
+): Promise<{ events: SseEvent[]; ended: boolean }> => readSseFrom(BASE, path, opts)
 
 function summarize(events: SseEvent[]): string {
   return events

@@ -2,8 +2,9 @@
 // state history, and resume-from-checkpoint across saver instances.
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres'
 import { graph } from '../graphs/agent'
+import { DEFAULT_DATABASE_URL } from '../src/checkpointer'
 
-const DSN = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5442/langgraph'
+const DSN = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL
 
 const saver = PostgresSaver.fromConnString(DSN)
 await saver.setup()

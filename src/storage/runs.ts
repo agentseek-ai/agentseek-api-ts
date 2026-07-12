@@ -42,6 +42,14 @@ const toRun = (row: RunRow): Run => ({
   updated_at: row.updated_at,
 })
 
+// Shallow-merges configs left-to-right (later wins) with a deep merge of the
+// nested `configurable` — the precedence assistant < thread < request must be
+// identical everywhere it's applied.
+const mergeConfigs = (...configs: (RunnableConfig | null | undefined)[]): RunnableConfig =>
+  Object.assign({}, ...configs, {
+    configurable: Object.assign({}, ...configs.map((c) => c?.configurable)),
+  }) as RunnableConfig
+
 const JOIN_POLL_MS = 500
 // Short replay window for buffers nobody will legitimately replay again
 // (non-resumable runs after terminal status, runs whose row was deleted).
@@ -181,9 +189,7 @@ export class PgRuns implements RunsRepo {
 
       if (!existingThread && (threadId == null || ifNotExists === 'create')) {
         threadId ??= uuid7()
-        const threadConfig = Object.assign({}, assistant.config, config, {
-          configurable: Object.assign({}, assistant.config?.configurable, config?.configurable),
-        })
+        const threadConfig = mergeConfigs(assistant.config, config)
         await client.query(
           `INSERT INTO threads (thread_id, status, metadata, config)
            VALUES ($1, 'busy', $2::jsonb, $3::jsonb)`,
@@ -199,14 +205,7 @@ export class PgRuns implements RunsRepo {
         )
       } else if (existingThread) {
         if (existingThread.status !== 'busy') {
-          const mergedThreadConfig = Object.assign({}, assistant.config, existingThread.config, config, {
-            configurable: Object.assign(
-              {},
-              assistant.config?.configurable,
-              existingThread.config?.configurable,
-              config?.configurable,
-            ),
-          })
+          const mergedThreadConfig = mergeConfigs(assistant.config, existingThread.config, config)
           await client.query(
             `UPDATE threads
              SET status = 'busy',
@@ -243,10 +242,7 @@ export class PgRuns implements RunsRepo {
 
       const existingThreadConfig = existingThread?.config ?? {}
       const configurable = Object.assign(
-        {},
-        assistant.config?.configurable,
-        existingThreadConfig?.configurable,
-        config?.configurable,
+        mergeConfigs(assistant.config, existingThreadConfig, config).configurable ?? {},
         {
           run_id: runId,
           thread_id: threadId,
@@ -298,19 +294,28 @@ export class PgRuns implements RunsRepo {
     }
   }
 
-  async get(runId: string, thread_id: string | undefined, auth: AuthContext | undefined): Promise<Run | null> {
-    const [filters] = await handleAuthEvent(auth, 'threads:read', { thread_id })
-
+  // Auth-scoped run lookup shared by get/delete/cancel: null when the run is
+  // missing OR the caller may not see its thread (indistinguishable by design).
+  private async fetchRunWithAuth(
+    runId: string,
+    threadId: string | undefined,
+    filters: Parameters<typeof isAuthMatching>[1],
+  ): Promise<(RunRow & { thread_metadata: Metadata }) | null> {
     const res = await this.pool.query<RunRow & { thread_metadata: Metadata }>(
       `SELECT r.*, t.metadata AS thread_metadata FROM runs r
        JOIN threads t ON t.thread_id = r.thread_id
-       WHERE r.run_id = $1 ${thread_id != null ? 'AND r.thread_id = $2' : ''}`,
-      thread_id != null ? [runId, thread_id] : [runId],
+       WHERE r.run_id = $1 ${threadId != null ? 'AND r.thread_id = $2' : ''}`,
+      threadId != null ? [runId, threadId] : [runId],
     )
     const row = res.rows[0]
-    if (!row) return null
-    if (!isAuthMatching(row.thread_metadata, filters)) return null
-    return toRun(row)
+    if (!row || !isAuthMatching(row.thread_metadata, filters)) return null
+    return row
+  }
+
+  async get(runId: string, thread_id: string | undefined, auth: AuthContext | undefined): Promise<Run | null> {
+    const [filters] = await handleAuthEvent(auth, 'threads:read', { thread_id })
+    const row = await this.fetchRunWithAuth(runId, thread_id, filters)
+    return row ? toRun(row) : null
   }
 
   async delete(run_id: string, thread_id: string | undefined, auth: AuthContext | undefined): Promise<string | null> {
@@ -319,14 +324,8 @@ export class PgRuns implements RunsRepo {
       thread_id,
     })
 
-    const res = await this.pool.query<RunRow & { thread_metadata: Metadata }>(
-      `SELECT r.*, t.metadata AS thread_metadata FROM runs r
-       JOIN threads t ON t.thread_id = r.thread_id
-       WHERE r.run_id = $1 ${thread_id != null ? 'AND r.thread_id = $2' : ''}`,
-      thread_id != null ? [run_id, thread_id] : [run_id],
-    )
-    const row = res.rows[0]
-    if (!row || !isAuthMatching(row.thread_metadata, filters)) {
+    const row = await this.fetchRunWithAuth(run_id, thread_id, filters)
+    if (!row) {
       throw new HTTPException(404, { message: 'Run not found' })
     }
 
@@ -394,15 +393,8 @@ export class PgRuns implements RunsRepo {
     const promises: Promise<unknown>[] = []
 
     for (const runId of runIds) {
-      const res = await this.pool.query<RunRow & { thread_metadata: Metadata }>(
-        `SELECT r.*, t.metadata AS thread_metadata FROM runs r
-         JOIN threads t ON t.thread_id = r.thread_id
-         WHERE r.run_id = $1 ${threadId != null ? 'AND r.thread_id = $2' : ''}`,
-        threadId != null ? [runId, threadId] : [runId],
-      )
-      const row = res.rows[0]
+      const row = await this.fetchRunWithAuth(runId, threadId, filters)
       if (!row) continue
-      if (!isAuthMatching(row.thread_metadata, filters)) continue
 
       foundRunsCount += 1
 

@@ -1,9 +1,80 @@
+// Shared HTTP + SSE helpers for the e2e suite AND the scripts/verify-*.ts
+// harnesses — keep the single copy here so the parsers can't drift.
 import type { Subprocess } from 'bun'
 
 export interface SseEvent {
   id: string | null
   event: string
   data: string
+}
+
+export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+export async function requestJson<T>(base: string, method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body != null ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    throw new Error(`${method} ${path} -> ${res.status}: ${await res.text()}`)
+  }
+  return (await res.json()) as T
+}
+
+// Minimal SSE reader: collects events until the stream ends, maxMs elapses,
+// or stopAfter events have been received.
+export async function readSse(
+  base: string,
+  path: string,
+  opts: { lastEventId?: string; maxMs?: number; stopAfter?: number } = {},
+): Promise<{ events: SseEvent[]; ended: boolean }> {
+  const controller = new AbortController()
+  const timer = opts.maxMs ? setTimeout(() => controller.abort(), opts.maxMs) : null
+  const headers: Record<string, string> = { Accept: 'text/event-stream' }
+  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId
+
+  const events: SseEvent[] = []
+  let ended = false
+  try {
+    const res = await fetch(`${base}${path}`, { headers, signal: controller.signal })
+    if (!res.ok || !res.body) throw new Error(`GET ${path} -> ${res.status}`)
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let cur: Partial<SseEvent> = {}
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        ended = true
+        break
+      }
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.startsWith('id:')) cur.id = line.slice(3).trim()
+        else if (line.startsWith('event:')) cur.event = line.slice(6).trim()
+        else if (line.startsWith('data:')) cur.data = (cur.data ?? '') + line.slice(5).trim()
+        else if (line === '' && cur.event) {
+          events.push({
+            id: cur.id ?? null,
+            event: cur.event,
+            data: cur.data ?? '',
+          })
+          cur = {}
+          if (opts.stopAfter && events.length >= opts.stopAfter) {
+            controller.abort()
+          }
+        }
+      }
+    }
+  } catch (e) {
+    if (!(e instanceof DOMException && e.name === 'AbortError')) throw e
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+  return { events, ended }
 }
 
 export class TestServer {
@@ -41,15 +112,7 @@ export class TestServer {
   }
 
   async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.base}${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: body != null ? JSON.stringify(body) : undefined,
-    })
-    if (!res.ok) {
-      throw new Error(`${method} ${path} -> ${res.status}: ${await res.text()}`)
-    }
-    return (await res.json()) as T
+    return requestJson<T>(this.base, method, path, body)
   }
 
   async rawPost(path: string, body: unknown): Promise<Response> {
@@ -64,53 +127,6 @@ export class TestServer {
     path: string,
     opts: { lastEventId?: string; maxMs?: number } = {},
   ): Promise<{ events: SseEvent[]; ended: boolean }> {
-    const controller = new AbortController()
-    const timer = opts.maxMs ? setTimeout(() => controller.abort(), opts.maxMs) : null
-    const headers: Record<string, string> = { Accept: 'text/event-stream' }
-    if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId
-
-    const events: SseEvent[] = []
-    let ended = false
-    try {
-      const res = await fetch(`${this.base}${path}`, {
-        headers,
-        signal: controller.signal,
-      })
-      if (!res.ok || !res.body) throw new Error(`GET ${path} -> ${res.status}`)
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      let cur: Partial<SseEvent> = {}
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) {
-          ended = true
-          break
-        }
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (line.startsWith('id:')) cur.id = line.slice(3).trim()
-          else if (line.startsWith('event:')) cur.event = line.slice(6).trim()
-          else if (line.startsWith('data:')) cur.data = (cur.data ?? '') + line.slice(5).trim()
-          else if (line === '' && cur.event) {
-            events.push({
-              id: cur.id ?? null,
-              event: cur.event,
-              data: cur.data ?? '',
-            })
-            cur = {}
-          }
-        }
-      }
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === 'AbortError')) throw e
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
-    return { events, ended }
+    return readSse(this.base, path, opts)
   }
 }
-
-export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
