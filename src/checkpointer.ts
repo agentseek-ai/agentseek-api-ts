@@ -83,3 +83,23 @@ export function getPostgresCheckpointer(): PostgresCheckpointer {
   }
   return registered
 }
+
+// Boot-time proof that the plugin actually intercepts: import the target
+// module and assert its export is OUR saver. Guards the versioned contract —
+// if an upgrade renames dist/storage/checkpoint.mjs or its export, the filter
+// would silently match nothing and checkpoints would fall back to upstream's
+// in-memory singleton. Registration alone cannot detect that.
+export async function assertCheckpointerIntercepted(): Promise<void> {
+  const { saver } = getPostgresCheckpointer()
+  const pkgJsonUrl = import.meta.resolve('@langchain/langgraph-api/package.json')
+  const checkpointUrl = new URL('dist/storage/checkpoint.mjs', pkgJsonUrl).href
+  const mod = (await import(checkpointUrl)) as { checkpointer?: unknown }
+  if (mod.checkpointer !== saver) {
+    throw new Error(
+      '@langchain/langgraph-api checkpoint module was NOT intercepted by the Bun plugin: ' +
+        'checkpoints would silently stay in memory. The internal module path or export of ' +
+        'the pinned package likely changed — verify dist/storage/checkpoint.mjs and the ' +
+        'plugin filter in src/checkpointer.ts.',
+    )
+  }
+}

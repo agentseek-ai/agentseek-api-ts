@@ -9,6 +9,9 @@ import type {
   OnConflictBehavior,
   RunnableConfig,
 } from '@langchain/langgraph-api/storage'
+import type { RunBroker } from './broker'
+
+const escapeLike = (value: string): string => value.replace(/[%_\\]/g, '\\$&')
 
 interface AssistantRow {
   assistant_id: string
@@ -39,7 +42,10 @@ const toAssistant = (row: AssistantRow): Assistant => ({
 const SORTABLE = new Set(['assistant_id', 'created_at', 'updated_at', 'name', 'graph_id'])
 
 export class PgAssistants implements AssistantsRepo {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly broker: RunBroker,
+  ) {}
 
   async *search(
     options: {
@@ -68,8 +74,9 @@ export class PgAssistants implements AssistantsRepo {
       where.push(`graph_id = $${params.length}`)
     }
     if (options.name) {
-      params.push(options.name)
-      where.push(`name = $${params.length}`)
+      // Upstream matches name case-insensitively on substring.
+      params.push(`%${escapeLike(options.name)}%`)
+      where.push(`name ILIKE $${params.length}`)
     }
     if (options.metadata) {
       params.push(JSON.stringify(options.metadata))
@@ -256,8 +263,29 @@ export class PgAssistants implements AssistantsRepo {
     }
 
     await this.pool.query(`DELETE FROM assistants WHERE assistant_id = $1`, [assistant_id])
+    // Upstream cascades deletion to the assistant's runs (runs.assistant_id
+    // has no FK): abort in-flight ones and release affected threads so a
+    // scheduled run can't execute against a deleted assistant.
+    const deletedRuns = await this.pool.query<{ run_id: string; thread_id: string }>(
+      `DELETE FROM runs WHERE assistant_id = $1 RETURNING run_id, thread_id`,
+      [assistant_id],
+    )
+    for (const { run_id } of deletedRuns.rows) {
+      this.broker.getControl(run_id)?.abort('interrupt')
+      this.broker.markFinished(run_id, 0)
+      this.broker.notify(run_id)
+    }
     if (delete_threads) {
       await this.pool.query(`DELETE FROM threads WHERE metadata->>'assistant_id' = $1`, [assistant_id])
+    } else if (deletedRuns.rows.length > 0) {
+      await this.pool.query(
+        `UPDATE threads SET status = 'idle', updated_at = now()
+         WHERE thread_id = ANY($1) AND status = 'busy' AND NOT EXISTS (
+           SELECT 1 FROM runs r
+           WHERE r.thread_id = threads.thread_id AND r.status IN ('pending', 'running')
+         )`,
+        [[...new Set(deletedRuns.rows.map((r) => r.thread_id))]],
+      )
     }
     return [assistant_id]
   }
@@ -287,8 +315,8 @@ export class PgAssistants implements AssistantsRepo {
       where.push(`graph_id = $${params.length}`)
     }
     if (options.name) {
-      params.push(options.name)
-      where.push(`name = $${params.length}`)
+      params.push(`%${escapeLike(options.name)}%`)
+      where.push(`name ILIKE $${params.length}`)
     }
     if (options.metadata) {
       params.push(JSON.stringify(options.metadata))

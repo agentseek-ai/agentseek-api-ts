@@ -21,8 +21,8 @@ export class PostgresOps implements Ops {
     private readonly saver: PostgresSaver,
   ) {
     this.broker = new RunBroker()
-    this.assistants = new PgAssistants(pool)
-    this.threads = new PgThreads(pool, saver)
+    this.assistants = new PgAssistants(pool, this.broker)
+    this.threads = new PgThreads(pool, saver, this.broker)
     this.runs = new PgRuns(pool, this.threads, this.broker)
   }
 
@@ -64,18 +64,34 @@ export class PostgresOps implements Ops {
     checkpointer?: boolean
     store?: boolean
   }): Promise<void> {
-    if (flags.runs) await this.pool.query(`DELETE FROM runs`)
+    if (flags.runs) {
+      await this.pool.query(`DELETE FROM runs`)
+      // Only a runs wipe invalidates in-process run state (cancel controls,
+      // replay buffers, wakeups); other flags must not touch live runs.
+      this.broker.reset()
+    }
     if (flags.threads) await this.pool.query(`DELETE FROM threads`)
     if (flags.assistants) {
-      // Keep graph-registered assistants intact, matching platform behavior of
-      // re-registering on boot; simplest faithful action is full wipe.
-      await this.pool.query(`DELETE FROM assistants`)
+      // Keep system-registered graph assistants (matches upstream): they are
+      // only re-created at boot, so wiping them would 404 all run creation.
+      await this.pool.query(`DELETE FROM assistants WHERE metadata->>'created_by' IS DISTINCT FROM 'system'`)
     }
     if (flags.checkpointer) {
       for (const table of ['checkpoint_writes', 'checkpoint_blobs', 'checkpoints']) {
         await this.pool.query(`TRUNCATE TABLE ${table}`).catch(() => undefined) // Saver tables may not exist yet.
       }
     }
-    this.broker.reset()
+    if (flags.store) {
+      // The store is upstream's in-memory singleton (not exports-map
+      // reachable); resolve its dist path the same way the plugin does.
+      try {
+        const pkgJsonUrl = import.meta.resolve('@langchain/langgraph-api/package.json')
+        const storeUrl = new URL('dist/storage/store.mjs', pkgJsonUrl).href
+        const { store } = (await import(storeUrl)) as { store: { clear(): Promise<void> } }
+        await store.clear()
+      } catch (error) {
+        console.warn('[storage] store truncate failed', error)
+      }
+    }
   }
 }

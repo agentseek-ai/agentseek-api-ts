@@ -4,6 +4,7 @@ import { v7 as uuid7 } from '@langchain/core/utils/uuid'
 import { Command, Send } from '@langchain/langgraph'
 import type { StateSnapshot } from '@langchain/langgraph'
 import type { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres'
+import type { RunBroker } from './broker'
 import { handleAuthEvent, isAuthMatching, type AuthContext } from '@langchain/langgraph-api/auth'
 import { getGraph } from '@langchain/langgraph-api/graph'
 import type {
@@ -59,6 +60,7 @@ export class PgThreads implements ThreadsRepo {
   constructor(
     private readonly pool: pg.Pool,
     private readonly saver: PostgresSaver,
+    private readonly broker: RunBroker,
   ) {
     this.state = new PgThreadsState(pool, this, saver)
   }
@@ -221,7 +223,10 @@ export class PgThreads implements ThreadsRepo {
       [threadId, status, values, interrupts],
     )
     if (res.rowCount === 0) {
-      throw new HTTPException(404, { message: 'Thread not found' })
+      // Called from the upstream worker's finally block: the thread may have
+      // been deleted while its run executed. Throwing would kill the
+      // fire-and-forget worker loop, so just log and return.
+      console.warn(`[storage] setStatus for missing thread ${threadId}; ignoring`)
     }
   }
 
@@ -236,8 +241,17 @@ export class PgThreads implements ThreadsRepo {
       })
     }
 
-    // Runs cascade via FK; checkpoints live in the saver's tables. Event
-    // buffers of the thread's runs are reclaimed by the broker TTL sweep.
+    // Abort in-flight runs and release their event buffers before the FK
+    // cascade removes the rows (the worker's tolerant setStatus handles the
+    // rest); checkpoints are removed via the saver.
+    const runsRes = await this.pool.query<{ run_id: string }>(`SELECT run_id FROM runs WHERE thread_id = $1`, [
+      thread_id,
+    ])
+    for (const { run_id } of runsRes.rows) {
+      this.broker.getControl(run_id)?.abort('interrupt')
+      this.broker.markFinished(run_id, 0)
+      this.broker.notify(run_id)
+    }
     await this.pool.query(`DELETE FROM threads WHERE thread_id = $1`, [thread_id])
     await this.saver.deleteThread(thread_id)
     return [thread_id]

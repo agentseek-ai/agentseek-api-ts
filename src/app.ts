@@ -1,14 +1,18 @@
 import { startServer } from '@langchain/langgraph-api/server'
 import type { LangGraphConfig } from './config'
-import { getPostgresCheckpointer } from './checkpointer'
+import { assertCheckpointerIntercepted, getPostgresCheckpointer } from './checkpointer'
 import { PostgresOps } from './storage'
 
 export async function runServer(config: LangGraphConfig): Promise<void> {
-  const PORT = Number(process.env.PORT ?? 2024)
+  // `||` (not `??`): a blank PORT= line in .env yields '' → Number('') === 0
+  // would bind a random ephemeral port.
+  const PORT = Number(process.env.PORT || 2024)
 
   // Registered by the bootstrap before this module (and therefore
-  // @langchain/langgraph-api) was loaded; throws if that ordering was violated.
+  // @langchain/langgraph-api) was loaded; throws if that ordering was violated
+  // or if the plugin no longer intercepts the pinned package's module.
   const { saver, pool } = getPostgresCheckpointer()
+  await assertCheckpointerIntercepted()
   await saver.setup()
 
   const ops = new PostgresOps(pool, saver)
@@ -36,7 +40,7 @@ export async function runServer(config: LangGraphConfig): Promise<void> {
   const { host, cleanup } = await startServer(
     {
       port: PORT,
-      nWorkers: Number(process.env.N_WORKERS ?? 2),
+      nWorkers: Number(process.env.N_WORKERS || 2),
       host: process.env.HOST ?? '0.0.0.0',
       cwd: process.cwd(),
       graphs: config.graphs,

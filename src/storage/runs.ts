@@ -43,6 +43,9 @@ const toRun = (row: RunRow): Run => ({
 })
 
 const JOIN_POLL_MS = 500
+// Short replay window for buffers nobody will legitimately replay again
+// (non-resumable runs after terminal status, runs whose row was deleted).
+const DELETED_RUN_BUFFER_GRACE_MS = 30_000
 
 export class PgRuns implements RunsRepo {
   public readonly stream: RunsStreamRepo
@@ -61,26 +64,39 @@ export class PgRuns implements RunsRepo {
   // so cancel() can abort mid-execution.
   async *next(): AsyncGenerator<{ run: Run; attempt: number; signal: AbortSignal }> {
     for (;;) {
-      const res = await this.pool.query<RunRow>(
-        `WITH candidate AS (
-           SELECT r.run_id FROM runs r
-           WHERE r.status = 'pending' AND r.created_at <= now()
-             AND NOT EXISTS (
-               SELECT 1 FROM runs r2
-               WHERE r2.thread_id = r.thread_id AND r2.status = 'running'
-             )
-           ORDER BY r.created_at
-           FOR UPDATE SKIP LOCKED
-           LIMIT 1
-         )
-         UPDATE runs SET status = 'running', attempt = attempt + 1, updated_at = now()
-         WHERE run_id IN (SELECT run_id FROM candidate)
-         RETURNING *`,
-      )
+      let res: pg.QueryResult<RunRow>
+      try {
+        res = await this.pool.query<RunRow>(
+          `WITH candidate AS MATERIALIZED (
+             -- MATERIALIZED is defensive: PG already refuses to inline a CTE
+             -- with FOR UPDATE, but the single-evaluation fence must not
+             -- depend on that implicit rule.
+             SELECT r.run_id FROM runs r
+             WHERE r.status = 'pending' AND r.created_at <= now()
+               AND NOT EXISTS (
+                 SELECT 1 FROM runs r2
+                 WHERE r2.thread_id = r.thread_id AND r2.status = 'running'
+               )
+             ORDER BY r.created_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT 1
+           )
+           UPDATE runs SET status = 'running', attempt = attempt + 1, updated_at = now()
+           WHERE run_id = (SELECT run_id FROM candidate)
+           RETURNING *`,
+        )
+      } catch (error) {
+        // Unique-violation on runs_one_running_per_thread: another worker won
+        // the race for this thread between our snapshot and the UPDATE. Yield
+        // nothing this round; the caller polls again shortly.
+        if ((error as { code?: string }).code === '23505') return
+        throw error
+      }
 
       const row = res.rows[0]
       if (!row) return
 
+      this.broker.beginIncarnation(row.run_id, row.attempt)
       const signal = this.broker.lock(row.run_id)
       try {
         yield { run: toRun(row), attempt: row.attempt, signal }
@@ -314,9 +330,25 @@ export class PgRuns implements RunsRepo {
       throw new HTTPException(404, { message: 'Run not found' })
     }
 
+    // Abort if mid-execution, then remove the run and everything it left
+    // behind: upstream semantics (FileSystemRuns.delete → checkpointer.delete)
+    // purge the run's checkpoints so rollback actually reverts thread state.
+    this.broker.getControl(run_id)?.abort('rollback')
     await this.pool.query(`DELETE FROM runs WHERE run_id = $1`, [run_id])
+    await this.pool.query(
+      `DELETE FROM checkpoint_writes w USING checkpoints c
+       WHERE w.thread_id = c.thread_id AND w.checkpoint_ns = c.checkpoint_ns AND w.checkpoint_id = c.checkpoint_id
+         AND c.thread_id = $1 AND c.metadata->>'run_id' = $2`,
+      [row.thread_id, run_id],
+    )
+    // checkpoint_blobs stay: channel-value versions are shared across
+    // checkpoints; orphans are reclaimed when the thread is deleted.
+    await this.pool.query(`DELETE FROM checkpoints WHERE thread_id = $1 AND metadata->>'run_id' = $2`, [
+      row.thread_id,
+      run_id,
+    ])
     // Let the TTL sweep reclaim the event buffer of a deleted run.
-    this.broker.markFinished(run_id)
+    this.broker.markFinished(run_id, DELETED_RUN_BUFFER_GRACE_MS)
     return row.run_id
   }
 
@@ -438,13 +470,26 @@ export class PgRuns implements RunsRepo {
   }
 
   async setStatus(runId: string, status: RunStatus): Promise<void> {
-    const res = await this.pool.query(`UPDATE runs SET status = $2, updated_at = now() WHERE run_id = $1`, [
-      runId,
-      status,
-    ])
-    if (res.rowCount === 0) throw new Error(`Run ${runId} not found`)
-    // Terminal status starts the replay-window TTL on the event buffer.
-    if (status !== 'pending' && status !== 'running') this.broker.markFinished(runId)
+    const res = await this.pool.query<{ kwargs: RunKwargs }>(
+      `UPDATE runs SET status = $2, updated_at = now() WHERE run_id = $1 RETURNING kwargs`,
+      [runId, status],
+    )
+    if (res.rowCount === 0) {
+      // The run row was deleted mid-flight (run/thread/assistant deletion).
+      // Throwing here would kill the upstream worker loop (queue() is
+      // fire-and-forget with no catch), so release the buffer and move on.
+      console.warn(`[storage] setStatus(${status}) for missing run ${runId}; releasing its event buffer`)
+      this.broker.markFinished(runId, DELETED_RUN_BUFFER_GRACE_MS)
+      this.broker.notify(runId)
+      return
+    }
+    if (status !== 'pending' && status !== 'running') {
+      // Terminal status starts the replay-window TTL. Nobody reconnects to a
+      // non-resumable run after the fact, so its buffer only needs a short
+      // grace for joiners still draining the tail — not the full window.
+      const resumable = res.rows[0]!.kwargs?.resumable ?? false
+      this.broker.markFinished(runId, resumable ? undefined : DELETED_RUN_BUFFER_GRACE_MS)
+    }
     // Wake joined streams promptly so they can observe the terminal status.
     this.broker.notify(runId)
   }

@@ -74,9 +74,31 @@ export async function recoverOrphanedRuns(pool: pg.Pool): Promise<number> {
      WHERE status = 'running' AND attempt < $1`,
     [MAX_RETRY_ATTEMPTS],
   )
-  await pool.query(
+  const errored = await pool.query<{ thread_id: string }>(
     `UPDATE runs SET status = 'error', updated_at = now()
-     WHERE status = 'running'`,
+     WHERE status = 'running'
+     RETURNING thread_id`,
   )
+  // Force-erroring a run bypasses the worker's thread-status callback, so
+  // release its thread here — otherwise it stays 'busy' forever.
+  if (errored.rows.length > 0) {
+    await pool.query(
+      `UPDATE threads SET status = 'error', updated_at = now()
+       WHERE thread_id = ANY($1) AND NOT EXISTS (
+         SELECT 1 FROM runs r
+         WHERE r.thread_id = threads.thread_id AND r.status IN ('pending', 'running')
+       )`,
+      [errored.rows.map((r) => r.thread_id)],
+    )
+  }
+  // Hard guarantee of thread serialization: the claim query's NOT EXISTS
+  // check runs on a statement snapshot, so two workers can race past it —
+  // this index makes the loser's UPDATE fail (23505) instead of letting two
+  // runs of one thread execute concurrently. Created AFTER recovery so
+  // leftover duplicate 'running' rows from a crashed process can't block it.
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS runs_one_running_per_thread ON runs (thread_id) WHERE status = 'running'`,
+  )
+
   return requeued.rowCount ?? 0
 }
