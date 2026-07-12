@@ -140,7 +140,7 @@ Options: `-p, --port <port>` (default `2024`, or `PORT` env), `-h, --help`.
 | `PORT` | `2024` | HTTP port. |
 | `HOST` | `0.0.0.0` | Bind address. |
 | `N_WORKERS` | `2` | Concurrent run workers. |
-| `RUN_EVENTS_TTL_SECONDS` | `3600` | How long finished runs stay replayable before their events are swept. |
+| `RUN_EVENTS_TTL_SECONDS` | `3600` | How long a finished resumable run stays replayable (non-resumable buffers are dropped ~30s after finish). |
 
 ## 🗂️ Config
 
@@ -186,8 +186,9 @@ src/storage/             PostgresOps — the Ops implementation injected upstrea
   no first-joiner race.
 - **Crash recovery**: on boot, runs stuck in `running` are requeued (up to 3
   attempts) and resume from their last checkpoint.
-- **Replay window**: events of finished runs are kept for
-  `RUN_EVENTS_TTL_SECONDS` (default 1 hour), then swept.
+- **Replay window**: events of a finished resumable run are kept for
+  `RUN_EVENTS_TTL_SECONDS` (default 1 hour), then swept; non-resumable
+  buffers are dropped ~30s after the run finishes.
 
 Postgres is the source of truth for run state, thread state, and checkpoints —
 those survive any restart. The stream replay buffer is deliberately in-memory
@@ -225,7 +226,8 @@ protocol server, so the module-load ordering is handled for you.
   invisible to the first. Multi-instance needs a shared broker (e.g. Redis
   pub/sub + Redis Lists), not just a second process.
 - **Stream replay does not survive a restart.** Events are buffered in memory
-  (TTL 1 hour after a run finishes, 10k events per run). Run results and step
+  (TTL 1 hour after a resumable run finishes, ~30s for non-resumable ones,
+  10k events per run). Run results and step
   history always survive via Postgres checkpoints; what's lost is only the
   ability to replay the token-by-token stream from before the restart.
 - **Store API is not Postgres-backed.** The upstream store is used as-is: it
@@ -245,7 +247,7 @@ bun install
 docker compose -f templates/docker-compose.yml up -d postgres
 
 bun run dev      # server on :2024
-bun test         # e2e suite (spawns its own server on :2098; needs Postgres up)
+bun test         # unit + e2e suites (e2e spawns its own server on :2098; needs Postgres up)
 bun run check    # prettier + oxlint + tsc --noEmit — must pass (pre-commit runs it)
 ```
 

@@ -138,7 +138,7 @@ bun run scripts/verify-advanced.ts    # token 流式 / interrupt / double-text
 | `PORT` | `2024` | HTTP 端口。 |
 | `HOST` | `0.0.0.0` | 绑定地址。 |
 | `N_WORKERS` | `2` | 并发 run worker 数量。 |
-| `RUN_EVENTS_TTL_SECONDS` | `3600` | run 结束后保持可回放的时长，超时后事件被清理。 |
+| `RUN_EVENTS_TTL_SECONDS` | `3600` | resumable run 结束后保持可回放的时长（非 resumable 的缓冲约 30 秒后即回收）。 |
 
 ## 🗂️ 配置
 
@@ -181,8 +181,8 @@ src/storage/             PostgresOps —— 注入到上游的 Ops 实现
   标志决定 —— 不存在"谁先加入"的竞态。
 - **崩溃恢复**：启动时把卡在 `running` 状态的 run 重新入队（最多 3 次
   尝试），从最后一个 checkpoint 继续执行。
-- **回放窗口**：已结束 run 的事件缓冲保留 `RUN_EVENTS_TTL_SECONDS`
-  （默认 1 小时），之后被清理。
+- **回放窗口**：resumable run 结束后事件缓冲保留 `RUN_EVENTS_TTL_SECONDS`
+  （默认 1 小时）后清理；非 resumable 的缓冲在 run 结束约 30 秒后即回收。
 
 run 状态、thread 状态与 checkpoint 以 Postgres 为事实来源，任何重启都不
 丢失；流的回放缓冲则刻意放在内存（与 Aegra 相同的取舍）——重启会丢掉
@@ -217,9 +217,9 @@ await runServer(config)
   `bun run dev`）会抢走队列里的 run，而它产生的流事件对第一个进程不可见。
   多实例需要共享的 broker（Redis pub/sub + Redis List），而不是简单地再
   起一个进程。
-- **流回放不跨重启。** 事件缓存在内存（run 结束后保留 1 小时、每 run 上
-  限 1 万条）。run 的结果与逐步历史始终由 Postgres checkpoint 保障；丢的
-  只是重启前 token 级流的回放能力。
+- **流回放不跨重启。** 事件缓存在内存（resumable run 结束后保留 1 小时，
+  非 resumable 约 30 秒，每 run 上限 1 万条）。run 的结果与逐步历史始终由
+  Postgres checkpoint 保障；丢的只是重启前 token 级流的回放能力。
 - **Store API 未接入 Postgres。** 沿用上游实现：数据在内存中操作，仅快照
   到工作目录的 `.langgraphjs_api.store.json` 文件。同目录重启可恢复，但
   换目录、容器未挂卷时数据即丢失，且无法用 SQL 访问。
@@ -235,7 +235,7 @@ bun install
 docker compose -f templates/docker-compose.yml up -d postgres
 
 bun run dev      # 服务器跑在 :2024
-bun test         # e2e 套件（自行拉起 :2098 的服务器；需要 Postgres 已启动）
+bun test         # 单元 + e2e 套件（e2e 自行拉起 :2098 的服务器；需要 Postgres 已启动）
 bun run check    # prettier + oxlint + tsc --noEmit —— 必须通过（pre-commit 会执行）
 ```
 
